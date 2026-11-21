@@ -8,8 +8,6 @@ from tools.budget_tool import calculate_budget
 from tools.weather_tool import get_weather
 from datetime import date, timedelta
 
-from tools.weather_tool import get_weather
-
 
 def test_schema_validates():
     schema = TravelItinerary.model_json_schema()

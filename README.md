@@ -46,7 +46,7 @@ An agentic, tool-augmented travel planning application built with **LangChain**,
 
 ### 1. Clone & Create a Virtual Environment
 
-    git clone [https://github.com/Brian-Fernandes/travel_planning_assistant.git](https://github.com/Brian-Fernandes/travel_planning_assistant.git)
+    git clone https://github.com/Brian-Fernandes/travel_planning_assistant.git
     cd travel_planning_assistant
     python -m venv .venv
 
