@@ -2,7 +2,7 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
-
+from typing import List, Optional
 class FlightOption(BaseModel):
     flight_id: str
     airline: str
@@ -55,7 +55,7 @@ class TravelItinerary(BaseModel):
     destination: str
     duration_days: int
     trip_summary: str
-    flight: FlightOption
-    hotel: HotelOption
+    flight: Optional[FlightOption] = None
+    hotel: Optional[HotelOption] = None
     itinerary: List[DayPlan]
     budget: BudgetBreakdown
