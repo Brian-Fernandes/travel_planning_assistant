@@ -4,7 +4,13 @@ from datetime import date, datetime, timedelta
 import streamlit as st
 from dotenv import load_dotenv
 
-from agent.schemas import FlightOption, HotelOption, TravelItinerary
+from agent.schemas import (
+    BudgetBreakdown,
+    DayPlan,
+    FlightOption,
+    HotelOption,
+    TravelItinerary,
+)
 from agent.travel_agent import create_travel_agent
 from tools.flight_tool import load_flights
 from tools.hotel_tool import load_hotels
@@ -34,6 +40,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+MAX_FREE_DEMO_RUNS = 3
+
 CITIES = [
     "Mumbai",
     "Goa",
@@ -61,6 +69,80 @@ TRANSIT_MODES = {
     "Point-to-Point Cab / Uber / Ola (Balanced)": 1200,
     "Full-Day Private Cab Rental (Time-Optimized)": 2500,
 }
+
+
+def build_sample_goa_itinerary() -> TravelItinerary:
+    """Return a pre-built, catalog-grounded sample itinerary with zero LLM calls."""
+    start = date.today() + timedelta(days=1)
+    return TravelItinerary(
+        destination="Goa",
+        duration_days=3,
+        trip_summary=(
+            "A zone-clustered 3-day Mumbai to Goa itinerary pairing SpiceJet FL0024 "
+            "and 5-star Royal Heritage (HOT0014) well within your ₹15,000 budget, "
+            "grouping North Goa coastal landmarks and Panjim/Old Goa heritage sites "
+            "by neighborhood to minimize cab transit time."
+        ),
+        flight=FlightOption(
+            flight_id="FL0024",
+            airline="SpiceJet",
+            origin="Mumbai",
+            destination="Goa",
+            departure_time="2025-07-15T14:38:00",
+            arrival_time="2025-07-15T18:38:00",
+            price=3304.0,
+        ),
+        hotel=HotelOption(
+            hotel_id="HOT0014",
+            name="Royal Heritage",
+            city="Goa",
+            stars=5,
+            price_per_night=1232.0,
+            amenities=["wifi", "parking", "breakfast", "pool"],
+        ),
+        itinerary=[
+            DayPlan(
+                day=1,
+                date=start.isoformat(),
+                morning=["Arrive in Goa and check in at Royal Heritage (Candolim/North Goa base)."],
+                afternoon=["Explore Fort Aguada overlooking the Arabian Sea (North Goa - Candolim zone)."],
+                evening=["Sunset stroll and coastal dinner at Baga & Calangute Beach (15-min local cab)."],
+                places=["Fort Aguada", "Baga & Calangute Beach"],
+                weather="31°C / 25°C — Mostly sunny with light coastal breeze",
+            ),
+            DayPlan(
+                day=2,
+                date=(start + timedelta(days=1)).isoformat(),
+                morning=["Visit Chapora Fort for panoramic river and sea views (North Goa - Vagator zone)."],
+                afternoon=["Browse handicrafts and local stalls at Anjuna Flea Market (10-min cab from Vagator)."],
+                evening=["Relaxed evening by the beach shacks in North Goa."],
+                places=["Chapora Fort", "Anjuna Flea Market"],
+                weather="30°C / 24°C — Partly cloudy, pleasant evening",
+            ),
+            DayPlan(
+                day=3,
+                date=(start + timedelta(days=2)).isoformat(),
+                morning=["Transfer to Panjim / Old Goa zone; tour Goa State Museum."],
+                afternoon=["Visit UNESCO-listed Basilica of Bom Jesus in Old Goa before airport transfer."],
+                evening=["Depart Goa for Mumbai."],
+                places=["Goa State Museum", "Basilica of Bom Jesus"],
+                weather="31°C / 25°C — Clear skies",
+            ),
+        ],
+        budget=BudgetBreakdown(
+            flight_cost=3304.0,
+            hotel_cost=2464.0,
+            food_cost=2400.0,
+            transport_cost=3600.0,
+            activity_cost=1200.0,
+            total_estimated_cost=12968.0,
+            currency="INR",
+            budget_note=(
+                "Sample itinerary grounded in catalog records FL0024 and HOT0014 "
+                "with point-to-point cab estimates (₹1,200/day)."
+            ),
+        ),
+    )
 
 
 def evaluate_itinerary_quality(itinerary: TravelItinerary, user_budget: float) -> tuple[int, list[str]]:
@@ -98,6 +180,8 @@ if "active_trip_idx" not in st.session_state:
     st.session_state["active_trip_idx"] = 0
 if "planner_expanded" not in st.session_state:
     st.session_state["planner_expanded"] = True
+if "server_key_runs" not in st.session_state:
+    st.session_state["server_key_runs"] = 0
 
 # Header Bar
 h_left, h_right = st.columns([3, 1])
@@ -113,7 +197,8 @@ with h_right:
             st.rerun()
 
 # Main-Canvas Trip Configuration Panel (No Sidebar)
-server_key_available = bool(os.getenv("GOOGLE_API_KEY"))
+server_key_available = bool(os.getenv("GOOGLE_API_KEY", "").strip())
+remaining_demo_runs = max(0, MAX_FREE_DEMO_RUNS - st.session_state["server_key_runs"])
 
 with st.expander("🧭 Configure Trip & Preferences", expanded=st.session_state["planner_expanded"]):
     r1_c1, r1_c2, r1_c3, r1_c4 = st.columns([1.2, 1.2, 1, 1.2])
@@ -152,7 +237,7 @@ with st.expander("🧭 Configure Trip & Preferences", expanded=st.session_state[
             index=1,
         )
 
-    r3_c1, r3_c2, r3_c3 = st.columns([1.2, 1.4, 1.4])
+    r3_c1, r3_c2, r3_c3, r3_c4 = st.columns([1.1, 1.4, 1.1, 1.0])
     with r3_c1:
         use_specific_date = st.checkbox("Specific Departure Date", value=False)
         travel_date = ""
@@ -161,25 +246,73 @@ with st.expander("🧭 Configure Trip & Preferences", expanded=st.session_state[
             travel_date = picked_date.strftime("%Y-%m-%d")
     with r3_c2:
         # Never pre-fill server secret into the widget
+        if server_key_available and remaining_demo_runs > 0:
+            key_label = f"Custom Gemini API Key ({remaining_demo_runs}/{MAX_FREE_DEMO_RUNS} free demo runs left)"
+            key_placeholder = "Leave blank to use free demo quota"
+        elif server_key_available:
+            key_label = "Gemini API Key (Free demo limit reached)"
+            key_placeholder = "Enter your own Gemini API key to continue"
+        else:
+            key_label = "Google Gemini API Key"
+            key_placeholder = "Paste your Gemini API key"
+
         user_api_key = st.text_input(
-            "Custom Gemini API Key (Optional)" if server_key_available else "Google Gemini API Key",
+            key_label,
             value="",
             type="password",
-            placeholder="Server key active — leave blank" if server_key_available else "Paste your Gemini API key",
+            placeholder=key_placeholder,
         )
     with r3_c3:
         st.write("")
         st.write("")
         plan_clicked = st.button("🚀 Generate Itinerary", type="primary", use_container_width=True)
+    with r3_c4:
+        st.write("")
+        st.write("")
+        sample_clicked = st.button(
+            "👀 Load Sample",
+            use_container_width=True,
+            help="Load a pre-built Mumbai → Goa itinerary instantly with zero API usage.",
+        )
+
+if sample_clicked:
+    sample_itinerary = build_sample_goa_itinerary()
+    trip_record = {
+        "label": f"Trip #{len(st.session_state['trip_history']) + 1}: Mumbai → Goa (3d • Sample)",
+        "origin": "Mumbai",
+        "destination": "Goa",
+        "user_budget": 15000.0,
+        "transit_mode": "Point-to-Point Cab / Uber / Ola (Balanced)",
+        "itinerary": sample_itinerary,
+    }
+    st.session_state["trip_history"].append(trip_record)
+    st.session_state["active_trip_idx"] = len(st.session_state["trip_history"]) - 1
+    st.session_state["planner_expanded"] = False
+    st.rerun()
 
 if plan_clicked:
     if origin == destination:
         st.warning("Origin and destination cities must be different.")
         st.stop()
 
-    effective_api_key = user_api_key.strip() or os.getenv("GOOGLE_API_KEY", "")
-    if not effective_api_key:
-        st.error("No Gemini API key configured. Please enter your key above or set GOOGLE_API_KEY in Secrets.")
+    custom_key = user_api_key.strip()
+    server_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    using_server_key = False
+
+    if custom_key:
+        effective_api_key = custom_key
+    elif server_key and st.session_state["server_key_runs"] < MAX_FREE_DEMO_RUNS:
+        effective_api_key = server_key
+        using_server_key = True
+    elif server_key:
+        st.warning(
+            f"You have used all {MAX_FREE_DEMO_RUNS} free demo generations for this session. "
+            "Paste your own free Google AI Studio API key above to continue generating unlimited trips, "
+            "or click **👀 Load Sample** to explore the interface."
+        )
+        st.stop()
+    else:
+        st.error("No Gemini API key configured. Please enter your key above or click **👀 Load Sample**.")
         st.stop()
 
     default_tomorrow = (date.today() + timedelta(days=1)).isoformat()
@@ -215,6 +348,9 @@ if plan_clicked:
             if not itinerary:
                 st.error("The agent could not generate a structured itinerary. Please try again.")
                 st.stop()
+
+            if using_server_key:
+                st.session_state["server_key_runs"] += 1
 
             # Programmatic Guardrail 1: Verify flight & hotel IDs exist in datasets
             all_flights = load_flights()
@@ -511,4 +647,4 @@ if history:
             )
         st.dataframe(comparison_rows, use_container_width=True, hide_index=True)
 else:
-    st.info("Configure your trip above and click **🚀 Generate Itinerary** to build a zone-clustered travel plan.")
+    st.info("Configure your trip above and click **🚀 Generate Itinerary** (or **👀 Load Sample** for an instant preview).")
