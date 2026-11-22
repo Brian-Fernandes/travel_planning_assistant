@@ -17,6 +17,8 @@ from ui.styles import inject_styles
 
 load_dotenv()
 
+SERVER_DEMO_LIMIT = 3
+
 st.set_page_config(
     page_title="AI Travel Planning Assistant",
     page_icon="✈️",
@@ -59,13 +61,30 @@ for key, default in [
     ("planner_expanded", True),
     ("busy_action", None),
     ("step1_discovery", None),
+    ("server_runs_used", 0),
+    ("demo_cap_notice", False),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
 
+def _using_server_key(custom_key_override: str | None = None) -> bool:
+    raw_custom = (
+        custom_key_override
+        if custom_key_override is not None
+        else st.session_state.get("in_api_key", "")
+    )
+    has_custom_key = bool(str(raw_custom).strip())
+    has_server_key = bool(os.getenv("GOOGLE_API_KEY", "").strip())
+    return (not has_custom_key) and has_server_key
+
+
 def _trigger_find():
     if st.session_state["busy_action"] is None:
+        if _using_server_key() and st.session_state["server_runs_used"] >= SERVER_DEMO_LIMIT:
+            st.session_state["demo_cap_notice"] = True
+            return
+        st.session_state["demo_cap_notice"] = False
         dest_val = st.session_state.get("in_dest", "Goa").strip()
         st.session_state["busy_action"] = "find"
         st.session_state["locked_find"] = {
@@ -84,6 +103,10 @@ def _trigger_find():
 
 def _trigger_build():
     if st.session_state["busy_action"] is None and st.session_state.get("step1_discovery"):
+        if _using_server_key() and st.session_state["server_runs_used"] >= SERVER_DEMO_LIMIT:
+            st.session_state["demo_cap_notice"] = True
+            return
+        st.session_state["demo_cap_notice"] = False
         s1 = st.session_state["step1_discovery"]
         dest_key = s1["destination"].lower()
         st.session_state["busy_action"] = "build"
@@ -106,6 +129,19 @@ def render_planner_fragment():
     busy = st.session_state["busy_action"]
 
     with st.expander("Configure Trip & Preferences", expanded=st.session_state["planner_expanded"]):
+        if server_key_available and not st.session_state.get("in_api_key", "").strip():
+            remaining = max(0, SERVER_DEMO_LIMIT - st.session_state["server_runs_used"])
+            st.caption(
+                f"Free Demo Mode: **{remaining} of {SERVER_DEMO_LIMIT}** server-key AI runs remaining this session "
+                "(or enter your own Gemini API key for unlimited runs)."
+            )
+
+        if st.session_state.get("demo_cap_notice"):
+            st.warning(
+                f"You've reached the **{SERVER_DEMO_LIMIT} free server-key runs** demo cap for this session. "
+                "Paste your own Google Gemini API key below to continue, or click **Load Sample**."
+            )
+
         r1_c1, r1_c2, r1_c3, r1_c4 = st.columns([1.2, 1.2, 1, 1.2])
         with r1_c1:
             origin = st.text_input(
@@ -230,7 +266,8 @@ def render_planner_fragment():
             try:
                 orig_in = lf.get("origin", origin)
                 dest_in = lf.get("destination", destination)
-                eff_key = lf.get("user_api_key", user_api_key).strip() or os.getenv("GOOGLE_API_KEY", "").strip()
+                locked_custom_key = lf.get("user_api_key", user_api_key)
+                eff_key = locked_custom_key.strip() or os.getenv("GOOGLE_API_KEY", "").strip()
 
                 if not orig_in or not dest_in:
                     st.warning("Please enter both origin and destination.")
@@ -252,6 +289,9 @@ def render_planner_fragment():
                         force_refresh_places=lf.get("force_refresh", False),
                         api_key=eff_key,
                     )
+                    if _using_server_key(locked_custom_key):
+                        st.session_state["server_runs_used"] += 1
+
                     st.session_state["step1_discovery"] = {
                         **s1_res,
                         "origin": orig_in,
@@ -327,7 +367,8 @@ def render_planner_fragment():
             if busy == "build":
                 lb = st.session_state.get("locked_build", {})
                 try:
-                    eff_key = lb.get("user_api_key", user_api_key).strip() or os.getenv("GOOGLE_API_KEY", "").strip()
+                    locked_custom_key = lb.get("user_api_key", user_api_key)
+                    eff_key = locked_custom_key.strip() or os.getenv("GOOGLE_API_KEY", "").strip()
                     chosen_labels = lb.get("selected_labels", selected_labels)
                     chosen_places = [places[options.index(lbl)] for lbl in chosen_labels if lbl in options]
 
@@ -360,6 +401,8 @@ def render_planner_fragment():
                         travel_date=s1["travel_date"],
                         api_key=eff_key,
                     )
+                    if _using_server_key(locked_custom_key):
+                        st.session_state["server_runs_used"] += 1
 
                     itinerary: TravelItinerary = bundle["itinerary"]
                     discovered_hotels = bundle["live_hotels"]
