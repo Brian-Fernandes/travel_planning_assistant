@@ -1,19 +1,19 @@
 import os
+import time
 from datetime import date, datetime, timedelta
 
 import streamlit as st
 from dotenv import load_dotenv
 
-from agent.schemas import (
-    BudgetBreakdown,
-    DayPlan,
-    FlightOption,
-    HotelOption,
-    TravelItinerary,
+from agent.schemas import TravelItinerary
+from agent.travel_agent import build_day0_itinerary, discover_route_and_places
+from ui.components import (
+    render_hero,
+    render_landing_attractions,
+    render_trip_workspace,
 )
-from agent.travel_agent import create_travel_agent
-from tools.flight_tool import load_flights
-from tools.hotel_tool import load_hotels
+from ui.sample_data import build_sample_goa_itinerary
+from ui.styles import inject_styles
 
 load_dotenv()
 
@@ -24,627 +24,414 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Hide sidebar completely for a clean, full-width product UI
+inject_styles()
+
 st.markdown(
     """
     <style>
-        [data-testid="stSidebar"], [data-testid="collapsedControl"] {
-            display: none !important;
-        }
-        .block-container {
-            padding-top: 2rem;
-            max-width: 1200px;
-        }
+    [data-testid="stAppViewContainer"], .stApp {
+        opacity: 1 !important;
+        filter: none !important;
+        pointer-events: auto !important;
+    }
+    [data-stale="true"] {
+        display: none !important;
+    }
+    div.stButton > button:active {
+        filter: brightness(0.72) !important;
+        transform: scale(0.98);
+    }
+    div.stButton > button:disabled {
+        background-color: #262930 !important;
+        color: #b8bec8 !important;
+        border: 1px solid #1b1e24 !important;
+        opacity: 0.92 !important;
+        cursor: not-allowed !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-MAX_FREE_DEMO_RUNS = 3
-
-CITIES = [
-    "Mumbai",
-    "Goa",
-    "Delhi",
-    "Bangalore",
-    "Chennai",
-    "Hyderabad",
-    "Kolkata",
-    "Jaipur",
-]
-
-PLACE_CATEGORIES = [
-    "beach",
-    "fort",
-    "market",
-    "museum",
-    "park",
-    "lake",
-    "temple",
-    "monument",
-]
-
-TRANSIT_MODES = {
-    "Metro / Auto / Local Bus (Budget)": 500,
-    "Point-to-Point Cab / Uber / Ola (Balanced)": 1200,
-    "Full-Day Private Cab Rental (Time-Optimized)": 2500,
-}
+for key, default in [
+    ("trip_history", []),
+    ("active_trip_idx", 0),
+    ("planner_expanded", True),
+    ("busy_action", None),
+    ("step1_discovery", None),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 
-def build_sample_goa_itinerary() -> TravelItinerary:
-    """Return a pre-built, catalog-grounded sample itinerary with zero LLM calls."""
-    start = date.today() + timedelta(days=1)
-    return TravelItinerary(
-        destination="Goa",
-        duration_days=3,
-        trip_summary=(
-            "A zone-clustered 3-day Mumbai to Goa itinerary pairing SpiceJet FL0024 "
-            "and 5-star Royal Heritage (HOT0014) well within your ₹15,000 budget, "
-            "grouping North Goa coastal landmarks and Panjim/Old Goa heritage sites "
-            "by neighborhood to minimize cab transit time."
-        ),
-        flight=FlightOption(
-            flight_id="FL0024",
-            airline="SpiceJet",
-            origin="Mumbai",
-            destination="Goa",
-            departure_time="2025-07-15T14:38:00",
-            arrival_time="2025-07-15T18:38:00",
-            price=3304.0,
-        ),
-        hotel=HotelOption(
-            hotel_id="HOT0014",
-            name="Royal Heritage",
-            city="Goa",
-            stars=5,
-            price_per_night=1232.0,
-            amenities=["wifi", "parking", "breakfast", "pool"],
-        ),
-        itinerary=[
-            DayPlan(
-                day=1,
-                date=start.isoformat(),
-                morning=["Arrive in Goa and check in at Royal Heritage (Candolim/North Goa base)."],
-                afternoon=["Explore Fort Aguada overlooking the Arabian Sea (North Goa - Candolim zone)."],
-                evening=["Sunset stroll and coastal dinner at Baga & Calangute Beach (15-min local cab)."],
-                places=["Fort Aguada", "Baga & Calangute Beach"],
-                weather="31°C / 25°C — Mostly sunny with light coastal breeze",
-            ),
-            DayPlan(
-                day=2,
-                date=(start + timedelta(days=1)).isoformat(),
-                morning=["Visit Chapora Fort for panoramic river and sea views (North Goa - Vagator zone)."],
-                afternoon=["Browse handicrafts and local stalls at Anjuna Flea Market (10-min cab from Vagator)."],
-                evening=["Relaxed evening by the beach shacks in North Goa."],
-                places=["Chapora Fort", "Anjuna Flea Market"],
-                weather="30°C / 24°C — Partly cloudy, pleasant evening",
-            ),
-            DayPlan(
-                day=3,
-                date=(start + timedelta(days=2)).isoformat(),
-                morning=["Transfer to Panjim / Old Goa zone; tour Goa State Museum."],
-                afternoon=["Visit UNESCO-listed Basilica of Bom Jesus in Old Goa before airport transfer."],
-                evening=["Depart Goa for Mumbai."],
-                places=["Goa State Museum", "Basilica of Bom Jesus"],
-                weather="31°C / 25°C — Clear skies",
-            ),
-        ],
-        budget=BudgetBreakdown(
-            flight_cost=3304.0,
-            hotel_cost=2464.0,
-            food_cost=2400.0,
-            transport_cost=3600.0,
-            activity_cost=1200.0,
-            total_estimated_cost=12968.0,
-            currency="INR",
-            budget_note=(
-                "Sample itinerary grounded in catalog records FL0024 and HOT0014 "
-                "with point-to-point cab estimates (₹1,200/day)."
-            ),
-        ),
-    )
+def _trigger_find():
+    if st.session_state["busy_action"] is None:
+        dest_val = st.session_state.get("in_dest", "Goa").strip()
+        st.session_state["busy_action"] = "find"
+        st.session_state["locked_find"] = {
+            "origin": st.session_state.get("in_origin", "Mumbai").strip(),
+            "destination": dest_val,
+            "duration_days": int(st.session_state.get("in_days", 3)),
+            "budget": float(st.session_state.get("in_budget", 15000)),
+            "custom_pref": st.session_state.get("in_custom_pref", ""),
+            "hotel_pref": st.session_state.get("in_hotel_pref", "Best value affordable hotel"),
+            "use_specific_date": bool(st.session_state.get("in_use_date", False)),
+            "picked_date": st.session_state.get("in_picked_date", date.today() + timedelta(days=2)),
+            "force_refresh": bool(st.session_state.get("in_force_refresh", False)),
+            "user_api_key": st.session_state.get("in_api_key", ""),
+        }
 
 
-def evaluate_itinerary_quality(itinerary: TravelItinerary, user_budget: float) -> tuple[int, list[str]]:
-    """Deterministic itinerary quality audit ported from ADK evaluation_service."""
-    score = 100
-    notes: list[str] = []
-
-    if len(itinerary.itinerary) != itinerary.duration_days:
-        score -= 20
-        notes.append("Day count mismatch")
-
-    seen_places: set[str] = set()
-    duplicates = False
-    for day in itinerary.itinerary:
-        for place in day.places:
-            key = place.strip().lower()
-            if key in seen_places:
-                duplicates = True
-            seen_places.add(key)
-
-    if duplicates:
-        score -= 15
-        notes.append("Duplicate attractions detected")
-
-    if itinerary.budget.total_estimated_cost > user_budget:
-        score -= 10
-        notes.append(f"Over budget by ₹{itinerary.budget.total_estimated_cost - user_budget:,.0f}")
-
-    return max(0, score), notes
+def _trigger_build():
+    if st.session_state["busy_action"] is None and st.session_state.get("step1_discovery"):
+        s1 = st.session_state["step1_discovery"]
+        dest_key = s1["destination"].lower()
+        st.session_state["busy_action"] = "build"
+        st.session_state["locked_build"] = {
+            "selected_labels": list(st.session_state.get(f"shortlist_{dest_key}", [])),
+            "extra_pin": st.session_state.get(f"extra_spot_{dest_key}", ""),
+            "hotel_pref": st.session_state.get("in_hotel_pref", "Best value affordable hotel"),
+            "duration_days": int(st.session_state.get("in_days", s1["duration_days"])),
+            "budget": float(st.session_state.get("in_budget", s1["budget"])),
+            "user_api_key": st.session_state.get("in_api_key", ""),
+        }
 
 
-if "trip_history" not in st.session_state:
-    st.session_state["trip_history"] = []
-if "active_trip_idx" not in st.session_state:
-    st.session_state["active_trip_idx"] = 0
-if "planner_expanded" not in st.session_state:
-    st.session_state["planner_expanded"] = True
-if "server_key_runs" not in st.session_state:
-    st.session_state["server_key_runs"] = 0
-
-# Header Bar
-h_left, h_right = st.columns([3, 1])
-with h_left:
-    st.title("✈️ AI Travel Planning Assistant")
-    st.caption(
-        "Zone-clustered itineraries, live Open-Meteo forecasts, cab realism, and side-by-side option comparisons."
-    )
-with h_right:
-    if st.session_state["trip_history"]:
-        if st.button("➕ Plan Another Trip", use_container_width=True):
-            st.session_state["planner_expanded"] = True
-            st.rerun()
-
-# Main-Canvas Trip Configuration Panel (No Sidebar)
+render_hero(has_history=bool(st.session_state["trip_history"]))
 server_key_available = bool(os.getenv("GOOGLE_API_KEY", "").strip())
-remaining_demo_runs = max(0, MAX_FREE_DEMO_RUNS - st.session_state["server_key_runs"])
 
-with st.expander("🧭 Configure Trip & Preferences", expanded=st.session_state["planner_expanded"]):
-    r1_c1, r1_c2, r1_c3, r1_c4 = st.columns([1.2, 1.2, 1, 1.2])
-    with r1_c1:
-        origin = st.selectbox("Origin City", CITIES, index=0)
-    with r1_c2:
-        destination = st.selectbox("Destination City", CITIES, index=1)
-    with r1_c3:
-        duration_days = st.number_input("Duration (Days)", min_value=1, max_value=7, value=3)
-    with r1_c4:
-        budget = st.number_input(
-            "Total Budget (INR)", min_value=3000, max_value=200000, value=15000, step=1000
-        )
 
-    r2_c1, r2_c2, r2_c3 = st.columns([1.4, 1.2, 1.4])
-    with r2_c1:
-        interests = st.multiselect(
-            "Interests",
-            PLACE_CATEGORIES,
-            default=["fort", "market", "museum"],
-        )
-    with r2_c2:
-        hotel_pref = st.selectbox(
-            "Hotel Tier",
-            [
-                "Best value affordable hotel",
-                "Budget-friendly stay (2-3 stars)",
-                "Comfortable mid-range (3-4 stars)",
-                "Luxury 5-star stay",
-            ],
-        )
-    with r2_c3:
-        transit_mode = st.selectbox(
-            "Local Cab & Transit Style",
-            list(TRANSIT_MODES.keys()),
-            index=1,
-        )
+@st.fragment
+def render_planner_fragment():
+    busy = st.session_state["busy_action"]
 
-    r3_c1, r3_c2, r3_c3, r3_c4 = st.columns([1.1, 1.4, 1.1, 1.0])
-    with r3_c1:
-        use_specific_date = st.checkbox("Specific Departure Date", value=False)
-        travel_date = ""
-        if use_specific_date:
-            picked_date = st.date_input("Departure Date", min_value=date.today())
-            travel_date = picked_date.strftime("%Y-%m-%d")
-    with r3_c2:
-        # Never pre-fill server secret into the widget
-        if server_key_available and remaining_demo_runs > 0:
-            key_label = f"Custom Gemini API Key ({remaining_demo_runs}/{MAX_FREE_DEMO_RUNS} free demo runs left)"
-            key_placeholder = "Leave blank to use free demo quota"
-        elif server_key_available:
-            key_label = "Gemini API Key (Free demo limit reached)"
-            key_placeholder = "Enter your own Gemini API key to continue"
-        else:
-            key_label = "Google Gemini API Key"
-            key_placeholder = "Paste your Gemini API key"
-
-        user_api_key = st.text_input(
-            key_label,
-            value="",
-            type="password",
-            placeholder=key_placeholder,
-        )
-    with r3_c3:
-        st.write("")
-        st.write("")
-        plan_clicked = st.button("🚀 Generate Itinerary", type="primary", use_container_width=True)
-    with r3_c4:
-        st.write("")
-        st.write("")
-        sample_clicked = st.button(
-            "👀 Load Sample",
-            use_container_width=True,
-            help="Load a pre-built Mumbai → Goa itinerary instantly with zero API usage.",
-        )
-
-if sample_clicked:
-    sample_itinerary = build_sample_goa_itinerary()
-    trip_record = {
-        "label": f"Trip #{len(st.session_state['trip_history']) + 1}: Mumbai → Goa (3d • Sample)",
-        "origin": "Mumbai",
-        "destination": "Goa",
-        "user_budget": 15000.0,
-        "transit_mode": "Point-to-Point Cab / Uber / Ola (Balanced)",
-        "itinerary": sample_itinerary,
-    }
-    st.session_state["trip_history"].append(trip_record)
-    st.session_state["active_trip_idx"] = len(st.session_state["trip_history"]) - 1
-    st.session_state["planner_expanded"] = False
-    st.rerun()
-
-if plan_clicked:
-    if origin == destination:
-        st.warning("Origin and destination cities must be different.")
-        st.stop()
-
-    custom_key = user_api_key.strip()
-    server_key = os.getenv("GOOGLE_API_KEY", "").strip()
-    using_server_key = False
-
-    if custom_key:
-        effective_api_key = custom_key
-    elif server_key and st.session_state["server_key_runs"] < MAX_FREE_DEMO_RUNS:
-        effective_api_key = server_key
-        using_server_key = True
-    elif server_key:
-        st.warning(
-            f"You have used all {MAX_FREE_DEMO_RUNS} free demo generations for this session. "
-            "Paste your own free Google AI Studio API key above to continue generating unlimited trips, "
-            "or click **👀 Load Sample** to explore the interface."
-        )
-        st.stop()
-    else:
-        st.error("No Gemini API key configured. Please enter your key above or click **👀 Load Sample**.")
-        st.stop()
-
-    default_tomorrow = (date.today() + timedelta(days=1)).isoformat()
-    date_clause = (
-        f" starting on {travel_date} (pass start_date='{travel_date}' to get_weather; "
-        f"do NOT pass travel_date to search_flights)"
-        if travel_date
-        else f" starting tomorrow ({default_tomorrow}, pass start_date='{default_tomorrow}' to get_weather)"
-    )
-    interests_clause = ", ".join(interests) if interests else "popular attractions"
-    est_daily_cab = TRANSIT_MODES[transit_mode]
-
-    prompt = (
-        f"Plan a {duration_days}-day trip from {origin} to {destination}{date_clause}. "
-        f"Total budget: ₹{budget:,}. "
-        f"Interests: {interests_clause}. "
-        f"Hotel preference: {hotel_pref}. "
-        f"Local transit preference: {transit_mode} (~₹{est_daily_cab}/day for local cab/transit). "
-        f"Group each day's attractions by neighborhood zone to minimize cab travel time. "
-        f"Use all available tools to find a flight, hotel, places to visit, live weather forecast, "
-        f"and calculate the full trip budget."
-    )
-
-    with st.spinner("Clustering attractions by zone, checking live weather, and building your itinerary..."):
-        try:
-            agent = create_travel_agent(api_key=effective_api_key)
-            result = agent.invoke(
-                {"messages": [{"role": "user", "content": prompt}]},
-                config={"recursion_limit": 30},
+    with st.expander("Configure Trip & Preferences", expanded=st.session_state["planner_expanded"]):
+        r1_c1, r1_c2, r1_c3, r1_c4 = st.columns([1.2, 1.2, 1, 1.2])
+        with r1_c1:
+            origin = st.text_input(
+                "Origin City (Any City)",
+                value="Mumbai",
+                key="in_origin",
+                placeholder="e.g. Udupi, Sindhudurg, Mumbai...",
+            ).strip()
+        with r1_c2:
+            destination = st.text_input(
+                "Destination City / Region",
+                value="Goa",
+                key="in_dest",
+                placeholder="e.g. Ranchi, Ellora, Assam, Goa...",
+            ).strip()
+        with r1_c3:
+            duration_days = st.number_input("Sightseeing Days (1–7)", min_value=1, max_value=7, value=3, key="in_days")
+        with r1_c4:
+            budget = st.number_input(
+                "Flight + Hotel Budget (INR)",
+                min_value=2000,
+                max_value=250000,
+                value=15000,
+                step=1000,
+                key="in_budget",
             )
-            itinerary: TravelItinerary | None = result.get("structured_response")
 
-            if not itinerary:
-                st.error("The agent could not generate a structured itinerary. Please try again.")
-                st.stop()
-
-            if using_server_key:
-                st.session_state["server_key_runs"] += 1
-
-            # Programmatic Guardrail 1: Verify flight & hotel IDs exist in datasets
-            all_flights = load_flights()
-            valid_flight_ids = {f["flight_id"] for f in all_flights}
-            if itinerary.flight and itinerary.flight.flight_id not in valid_flight_ids:
-                itinerary.flight = None
-                itinerary.budget.total_estimated_cost -= itinerary.budget.flight_cost
-                itinerary.budget.flight_cost = 0.0
-
-            all_hotels = load_hotels()
-            valid_hotel_ids = {h["hotel_id"] for h in all_hotels}
-            if itinerary.hotel and itinerary.hotel.hotel_id not in valid_hotel_ids:
-                itinerary.hotel = None
-                itinerary.budget.total_estimated_cost -= itinerary.budget.hotel_cost
-                itinerary.budget.hotel_cost = 0.0
-
-            # Programmatic Guardrail 2: Enforce sequential dates & clamp out-of-window forecasts
-            expected_start = (
-                datetime.strptime(travel_date, "%Y-%m-%d").date()
-                if travel_date
-                else date.today() + timedelta(days=1)
+        r2_c1, r2_c2 = st.columns([2.2, 1.3])
+        with r2_c1:
+            custom_pref = st.text_input(
+                "Your Preferences (Optional)",
+                value="",
+                key="in_custom_pref",
+                placeholder="Type preference (e.g., waterfalls, heritage sites, wildlife) or leave blank",
             )
-            max_live_weather_date = date.today() + timedelta(days=14)
-            for idx, day_plan in enumerate(itinerary.itinerary):
-                current_day = expected_start + timedelta(days=idx)
-                day_plan.date = current_day.isoformat()
-                if current_day > max_live_weather_date:
-                    day_plan.weather = "Live forecast unavailable (beyond 14-day window)"
+        with r2_c2:
+            hotel_pref = st.selectbox(
+                "Hotel Tier",
+                [
+                    "Best value affordable hotel",
+                    "Budget-friendly stay (2-3 stars)",
+                    "Comfortable mid-range (3-4 stars)",
+                    "Luxury 5-star stay",
+                ],
+                key="in_hotel_pref",
+            )
 
-            # Append to Session Trip History
-            trip_record = {
-                "label": f"Trip #{len(st.session_state['trip_history']) + 1}: {origin} → {destination} ({duration_days}d)",
-                "origin": origin,
-                "destination": destination,
-                "user_budget": float(budget),
-                "transit_mode": transit_mode,
-                "itinerary": itinerary,
-            }
-            st.session_state["trip_history"].append(trip_record)
+        r3_c1, r3_c2, r3_c3, r3_c4, r3_c5 = st.columns([1.05, 1.05, 1.25, 0.95, 0.9])
+        with r3_c1:
+            use_specific_date = st.checkbox("Specific Date", value=False, key="in_use_date")
+            if use_specific_date:
+                st.date_input(
+                    "Day 1 Sightseeing Date",
+                    min_value=date.today() + timedelta(days=1),
+                    key="in_picked_date",
+                )
+        with r3_c2:
+            st.checkbox(
+                "Fresh Web Places",
+                value=False,
+                key="in_force_refresh",
+                help="Bypass places.json cache and discover fresh attractions.",
+            )
+        with r3_c3:
+            user_api_key = st.text_input(
+                "Custom API Key (Optional)" if server_key_available else "Google Gemini API Key",
+                value="",
+                type="password",
+                key="in_api_key",
+                placeholder="Server key active" if server_key_available else "Paste Gemini API key",
+            )
+        with r3_c4:
+            st.write("")
+            st.write("")
+            st.button(
+                "Searching..." if busy == "find" else "Find Route & Places",
+                key="btn_find_route",
+                type="primary",
+                width="stretch",
+                disabled=(busy == "find"),
+                on_click=_trigger_find,
+            )
+        with r3_c5:
+            st.write("")
+            st.write("")
+            sample_clicked = st.button(
+                "Load Sample",
+                key="btn_load_sample",
+                width="stretch",
+                help="Preview a Mumbai → Goa itinerary instantly with zero API usage.",
+            )
+
+        if sample_clicked:
+            sample_itinerary = build_sample_goa_itinerary()
+            st.session_state["trip_history"].append(
+                {
+                    "label": f"Trip #{len(st.session_state['trip_history']) + 1}: Mumbai → Goa (3d • Sample)",
+                    "origin": "Mumbai",
+                    "destination": "Goa",
+                    "user_budget": 15000.0,
+                    "live_hotels": [
+                        {
+                            "hotel_id": "LIVE_H1",
+                            "name": "Royal Heritage",
+                            "city": "Goa",
+                            "stars": 5,
+                            "price_per_night": 1232.0,
+                            "amenities": ["wifi", "parking", "breakfast", "pool"],
+                            "source_note": "Sample rate",
+                        }
+                    ],
+                    "itinerary": sample_itinerary,
+                }
+            )
             st.session_state["active_trip_idx"] = len(st.session_state["trip_history"]) - 1
             st.session_state["planner_expanded"] = False
             st.rerun()
 
-        except Exception as exc:
-            st.error(f"Error generating itinerary: {exc}")
-            st.stop()
+        # -------- STEP 1 EXECUTION (INSIDE FRAGMENT — NO FULL PAGE FLICKER) --------
+        if busy == "find":
+            lf = st.session_state.get("locked_find", {})
+            try:
+                orig_in = lf.get("origin", origin)
+                dest_in = lf.get("destination", destination)
+                eff_key = lf.get("user_api_key", user_api_key).strip() or os.getenv("GOOGLE_API_KEY", "").strip()
 
-# Render Trip Workspace if History Exists
-history = st.session_state["trip_history"]
-
-if history:
-    # History Switcher Bar
-    if len(history) > 1:
-        labels = [item["label"] for item in history]
-        selected_label = st.radio(
-            "Saved Session Trips",
-            labels,
-            index=st.session_state["active_trip_idx"],
-            horizontal=True,
-        )
-        st.session_state["active_trip_idx"] = labels.index(selected_label)
-
-    active_record = history[st.session_state["active_trip_idx"]]
-    itinerary: TravelItinerary = active_record["itinerary"]
-    rec_origin = active_record["origin"]
-    rec_dest = active_record["destination"]
-    user_budget = active_record["user_budget"]
-
-    # Quality Audit Banner
-    quality_score, audit_notes = evaluate_itinerary_quality(itinerary, user_budget)
-    status_badge = f"Plan Audit: **{quality_score}/100**" + (
-        f" ({', '.join(audit_notes)})" if audit_notes else " • All checks passed"
-    )
-
-    st.subheader(f"{rec_origin} → {itinerary.destination} ({itinerary.duration_days}-Day Itinerary)")
-    st.caption(f"🚌 Transit Style: **{active_record['transit_mode']}** | ✅ {status_badge}")
-    st.info(itinerary.trip_summary)
-
-    # Top-Level Workspace Tabs: Itinerary | Compare Flights & Hotels | Compare Saved Trips
-    tab_plan, tab_options, tab_compare = st.tabs(
-        [
-            "📅 Day-by-Day Itinerary & Budget",
-            "⚖️ Compare & Swap Flights / Hotels",
-            f"🗂️ Compare Saved Trips ({len(history)})",
-        ]
-    )
-
-    with tab_plan:
-        b = itinerary.budget
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
-        col1.metric("Total Estimated", f"₹{b.total_estimated_cost:,.0f}")
-        col2.metric("Flight", f"₹{b.flight_cost:,.0f}")
-        col3.metric("Hotel", f"₹{b.hotel_cost:,.0f}")
-        col4.metric("Food (Est.)", f"₹{b.food_cost:,.0f}")
-        col5.metric("Cab / Transit", f"₹{b.transport_cost:,.0f}")
-        col6.metric("Activities", f"₹{b.activity_cost:,.0f}")
-        st.caption(f"ℹ️ {b.budget_note}")
-
-        st.divider()
-
-        f_col, h_col = st.columns(2)
-        with f_col:
-            st.markdown("### 🛫 Selected Flight")
-            if itinerary.flight:
-                f = itinerary.flight
-                st.write(f"**{f.airline}** (`{f.flight_id}`)")
-                st.write(f"**Route:** {f.origin} → {f.destination}")
-                st.write(f"**Departure:** {f.departure_time} | **Arrival:** {f.arrival_time}")
-                st.write(f"**Ticket Price:** ₹{f.price:,.0f}")
-            else:
-                st.warning("No direct flights found in the catalog for this route. Flight cost set to ₹0.")
-
-        with h_col:
-            st.markdown("### 🏨 Selected Hotel")
-            if itinerary.hotel:
-                h = itinerary.hotel
-                st.write(f"**{h.name}** ({'⭐' * h.stars}) — `{h.hotel_id}`")
-                st.write(f"**City:** {h.city} | **Rate:** ₹{h.price_per_night:,.0f} / night")
-                st.write(f"**Amenities:** {', '.join(h.amenities)}")
-            else:
-                st.warning("No suitable hotels found in the catalog. Hotel cost set to ₹0.")
-
-        st.divider()
-
-        st.markdown("### 🗓️ Zone-Clustered Daily Schedule")
-        day_tabs = st.tabs([f"Day {d.day} ({d.date})" for d in itinerary.itinerary])
-
-        for d_tab, day_plan in zip(day_tabs, itinerary.itinerary):
-            with d_tab:
-                st.caption(f"🌤️ **Forecast:** {day_plan.weather}")
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.markdown("**Morning**")
-                    for item in day_plan.morning:
-                        st.markdown(f"- {item}")
-                with c2:
-                    st.markdown("**Afternoon**")
-                    for item in day_plan.afternoon:
-                        st.markdown(f"- {item}")
-                with c3:
-                    st.markdown("**Evening**")
-                    for item in day_plan.evening:
-                        st.markdown(f"- {item}")
-
-                if day_plan.places:
-                    st.markdown(f"**Featured Places:** {', '.join(day_plan.places)}")
-
-        st.divider()
-        st.download_button(
-            label="⬇️ Download Itinerary (JSON)",
-            data=itinerary.model_dump_json(indent=2),
-            file_name=f"{itinerary.destination.lower()}_itinerary.json",
-            mime="application/json",
-        )
-
-    with tab_options:
-        st.markdown("Compare all available catalog options for this route and swap selections with live budget recalculation.")
-        nights = max(itinerary.duration_days - 1, 1)
-
-        route_flights = [
-            f for f in load_flights()
-            if f["from"].strip().lower() == rec_origin.strip().lower()
-            and f["to"].strip().lower() == rec_dest.strip().lower()
-        ]
-        route_flights.sort(key=lambda x: float(x["price"]))
-
-        city_hotels = [
-            h for h in load_hotels()
-            if h["city"].strip().lower() == rec_dest.strip().lower()
-        ]
-        city_hotels.sort(key=lambda x: (-int(x["stars"]), float(x["price_per_night"])))
-
-        opt_c1, opt_c2 = st.columns(2)
-        with opt_c1:
-            st.markdown(f"#### 🛫 Available Flights ({rec_origin} → {rec_dest})")
-            if route_flights:
-                st.dataframe(
-                    [
-                        {
-                            "ID": f["flight_id"],
-                            "Airline": f["airline"],
-                            "Departure": f["departure_time"],
-                            "Price (₹)": f["price"],
-                        }
-                        for f in route_flights
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                flight_choices = {
-                    f"{f['flight_id']} — {f['airline']} (₹{f['price']:,})": f
-                    for f in route_flights
-                }
-                current_f_key = next(
-                    (k for k, v in flight_choices.items() if itinerary.flight and v["flight_id"] == itinerary.flight.flight_id),
-                    list(flight_choices.keys())[0],
-                )
-                picked_f_label = st.selectbox(
-                    "Active Flight Selection",
-                    list(flight_choices.keys()),
-                    index=list(flight_choices.keys()).index(current_f_key),
-                    key=f"flight_swap_{st.session_state['active_trip_idx']}",
-                )
-                chosen_f = flight_choices[picked_f_label]
-                if not itinerary.flight or chosen_f["flight_id"] != itinerary.flight.flight_id:
-                    itinerary.flight = FlightOption(
-                        flight_id=chosen_f["flight_id"],
-                        airline=chosen_f["airline"],
-                        origin=chosen_f["from"],
-                        destination=chosen_f["to"],
-                        departure_time=chosen_f["departure_time"],
-                        arrival_time=chosen_f["arrival_time"],
-                        price=float(chosen_f["price"]),
+                if not orig_in or not dest_in:
+                    st.warning("Please enter both origin and destination.")
+                elif orig_in.lower() == dest_in.lower():
+                    st.warning("Origin and destination must be different.")
+                elif not eff_key:
+                    st.error("No Gemini API key configured.")
+                else:
+                    t0 = time.perf_counter()
+                    t_date = (
+                        lf["picked_date"].strftime("%Y-%m-%d")
+                        if lf.get("use_specific_date") and lf.get("picked_date")
+                        else ""
                     )
-                    itinerary.budget.flight_cost = float(chosen_f["price"])
-                    itinerary.budget.total_estimated_cost = (
-                        itinerary.budget.flight_cost
-                        + itinerary.budget.hotel_cost
-                        + itinerary.budget.food_cost
-                        + itinerary.budget.transport_cost
-                        + itinerary.budget.activity_cost
+                    s1_res = discover_route_and_places(
+                        origin=orig_in,
+                        destination=dest_in,
+                        custom_pref=lf.get("custom_pref", ""),
+                        force_refresh_places=lf.get("force_refresh", False),
+                        api_key=eff_key,
                     )
-                    st.rerun()
-            else:
-                st.info("No catalog flights exist for this city pair.")
+                    st.session_state["step1_discovery"] = {
+                        **s1_res,
+                        "origin": orig_in,
+                        "destination": dest_in,
+                        "duration_days": lf.get("duration_days", duration_days),
+                        "budget": lf.get("budget", budget),
+                        "travel_date": t_date,
+                        "elapsed": round(time.perf_counter() - t0, 2),
+                    }
+            except Exception as exc:
+                st.error(f"Discovery failed: {exc}")
+            finally:
+                st.session_state["busy_action"] = None
+                st.rerun(scope="fragment")
 
-        with opt_c2:
-            st.markdown(f"#### 🏨 Available Hotels in {rec_dest} ({nights} night{'s' if nights > 1 else ''})")
-            if city_hotels:
-                st.dataframe(
-                    [
-                        {
-                            "ID": h["hotel_id"],
-                            "Hotel": h["name"],
-                            "Stars": "⭐" * int(h["stars"]),
-                            "Per Night (₹)": h["price_per_night"],
-                            "Stay Total (₹)": h["price_per_night"] * nights,
-                        }
-                        for h in city_hotels
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                hotel_choices = {
-                    f"{h['hotel_id']} — {h['name']} ({h['stars']}★, ₹{h['price_per_night']:,}/night)": h
-                    for h in city_hotels
-                }
-                current_h_key = next(
-                    (k for k, v in hotel_choices.items() if itinerary.hotel and v["hotel_id"] == itinerary.hotel.hotel_id),
-                    list(hotel_choices.keys())[0],
-                )
-                picked_h_label = st.selectbox(
-                    "Active Hotel Selection",
-                    list(hotel_choices.keys()),
-                    index=list(hotel_choices.keys()).index(current_h_key),
-                    key=f"hotel_swap_{st.session_state['active_trip_idx']}",
-                )
-                chosen_h = hotel_choices[picked_h_label]
-                if not itinerary.hotel or chosen_h["hotel_id"] != itinerary.hotel.hotel_id:
-                    itinerary.hotel = HotelOption(
-                        hotel_id=chosen_h["hotel_id"],
-                        name=chosen_h["name"],
-                        city=chosen_h["city"],
-                        stars=int(chosen_h["stars"]),
-                        price_per_night=float(chosen_h["price_per_night"]),
-                        amenities=chosen_h["amenities"],
-                    )
-                    itinerary.budget.hotel_cost = float(chosen_h["price_per_night"]) * nights
-                    itinerary.budget.total_estimated_cost = (
-                        itinerary.budget.flight_cost
-                        + itinerary.budget.hotel_cost
-                        + itinerary.budget.food_cost
-                        + itinerary.budget.transport_cost
-                        + itinerary.budget.activity_cost
-                    )
-                    st.rerun()
+        # -------- NESTED STEP 2 SHORTLIST PANEL (INSIDE FRAGMENT) --------
+        if st.session_state.get("step1_discovery"):
+            s1 = st.session_state["step1_discovery"]
+            st.divider()
+            st.success(f"Route & 20 attractions ready in **{s1['elapsed']}s** | Source: `{s1['places_source']}`")
 
-    with tab_compare:
-        st.markdown("#### Side-by-Side Comparison of Your Generated Trips")
-        comparison_rows = []
-        for idx, rec in enumerate(history, start=1):
-            it = rec["itinerary"]
-            comparison_rows.append(
-                {
-                    "Trip": f"#{idx}: {rec['origin']} → {it.destination}",
-                    "Days": it.duration_days,
-                    "Transit Mode": rec["transit_mode"].split(" (")[0],
-                    "Flight": f"{it.flight.airline} (₹{it.budget.flight_cost:,.0f})" if it.flight else "None (₹0)",
-                    "Hotel": f"{it.hotel.name} ({it.hotel.stars}★)" if it.hotel else "None",
-                    "Cab/Transit (₹)": f"₹{it.budget.transport_cost:,.0f}",
-                    "Total Est. (₹)": f"₹{it.budget.total_estimated_cost:,.0f}",
-                    "Target Budget (₹)": f"₹{rec['user_budget']:,.0f}",
-                }
+            c1, c2 = st.columns(2)
+            with c1:
+                st.info(
+                    f"**Day-0 Transit Path:** {s1['orig_hub']['input_name']} → **{s1['orig_hub']['city']} ({s1['orig_hub']['code']})** "
+                    f"✈️ **{s1['dest_hub']['city']} ({s1['dest_hub']['code']})** → Transfer to **{s1['destination']}** base"
+                )
+            with c2:
+                fl = s1["flight"]
+                if fl:
+                    st.info(f"**Catalog Flight:** {fl['airline']} ({fl.get('flight_no', fl['flight_id'])}) | {fl.get('duration', '')} | **₹{fl['price']:,.0f}**")
+                else:
+                    st.warning("No direct catalog flight found (Book separately).")
+
+            st.subheader(f"Shortlist Attractions in {s1['destination']}")
+            places = s1["places"]
+            options = [f"{p['name']} ({p['city']} · {p['zone']})" for p in places]
+            selected_labels = st.multiselect(
+                f"Pick from {len(places)} discovered attractions:",
+                options=options,
+                default=options[: min(6, len(options))],
+                key=f"shortlist_{s1['destination'].lower()}",
             )
-        st.dataframe(comparison_rows, use_container_width=True, hide_index=True)
+
+            selected_set = set(selected_labels)
+            unselected_names = [
+                places[idx]["name"]
+                for idx, lbl in enumerate(options)
+                if lbl not in selected_set
+            ]
+            if len(unselected_names) >= 2:
+                dyn_placeholder = f"Type your own spot or add discovered options (e.g., {unselected_names[0]}, {unselected_names[1]})"
+            elif len(unselected_names) == 1:
+                dyn_placeholder = f"Type your own spot or add discovered option (e.g., {unselected_names[0]})"
+            else:
+                dyn_placeholder = f"Type any extra spot in {s1['destination']} or leave blank"
+
+            extra_pin = st.text_input(
+                "Add any extra custom spot (Optional)",
+                value="",
+                key=f"extra_spot_{s1['destination'].lower()}",
+                placeholder=dyn_placeholder,
+            )
+
+            st.button(
+                "Building..." if busy == "build" else "Build Itinerary",
+                key="btn_build_itin",
+                type="primary",
+                disabled=(busy == "build"),
+                on_click=_trigger_build,
+            )
+
+            if busy == "build":
+                lb = st.session_state.get("locked_build", {})
+                try:
+                    eff_key = lb.get("user_api_key", user_api_key).strip() or os.getenv("GOOGLE_API_KEY", "").strip()
+                    chosen_labels = lb.get("selected_labels", selected_labels)
+                    chosen_places = [places[options.index(lbl)] for lbl in chosen_labels if lbl in options]
+
+                    for raw_pin in lb.get("extra_pin", extra_pin).split(","):
+                        if raw_pin.strip():
+                            chosen_places.append(
+                                {
+                                    "name": raw_pin.strip(),
+                                    "city": s1["destination"],
+                                    "zone": "Custom Pin",
+                                    "type": "must-visit",
+                                    "rating": 5.0,
+                                }
+                            )
+
+                    dur_in = int(lb.get("duration_days", s1["duration_days"]))
+                    bud_in = float(lb.get("budget", s1["budget"]))
+
+                    bundle = build_day0_itinerary(
+                        origin=s1["origin"],
+                        destination=s1["destination"],
+                        duration_days=dur_in,
+                        budget=bud_in,
+                        hotel_pref=lb.get("hotel_pref", hotel_pref),
+                        selected_places=chosen_places,
+                        orig_hub=s1["orig_hub"],
+                        dest_hub=s1["dest_hub"],
+                        flight=s1["flight"],
+                        places_source=s1["places_source"],
+                        travel_date=s1["travel_date"],
+                        api_key=eff_key,
+                    )
+
+                    itinerary: TravelItinerary = bundle["itinerary"]
+                    discovered_hotels = bundle["live_hotels"]
+                    weather_map = bundle.get("weather_summary_map", {})
+
+                    nights = max(dur_in, 1)
+                    if itinerary.hotel:
+                        itinerary.budget.hotel_cost = round(itinerary.hotel.price_per_night * nights, 2)
+                    itinerary.budget.food_cost = 0.0
+                    itinerary.budget.transport_cost = 0.0
+                    itinerary.budget.activity_cost = 0.0
+                    itinerary.budget.total_estimated_cost = round(
+                        itinerary.budget.flight_cost + itinerary.budget.hotel_cost, 2
+                    )
+                    itinerary.budget.budget_note = (
+                        f"Combined Flight (₹{itinerary.budget.flight_cost:,.0f}) + "
+                        f"{nights} Hotel Night{'s' if nights > 1 else ''} (₹{itinerary.budget.hotel_cost:,.0f}) "
+                        f"| Places Source: {bundle['places_source']}."
+                    )
+
+                    expected_day1 = (
+                        datetime.strptime(s1["travel_date"], "%Y-%m-%d").date()
+                        if s1["travel_date"]
+                        else date.today() + timedelta(days=2)
+                    )
+                    max_live_weather_date = date.today() + timedelta(days=14)
+
+                    for day_plan in itinerary.itinerary:
+                        if day_plan.day == 0:
+                            day_plan.date = (expected_day1 - timedelta(days=1)).isoformat()
+                            day_plan.weather = "Arrival & Staging Transit"
+                        else:
+                            current_day = expected_day1 + timedelta(days=day_plan.day - 1)
+                            iso_d = current_day.isoformat()
+                            day_plan.date = iso_d
+                            if iso_d in weather_map:
+                                day_plan.weather = weather_map[iso_d]
+                            elif current_day > max_live_weather_date:
+                                day_plan.weather = "Live forecast unavailable (beyond 14-day window)"
+                            else:
+                                day_plan.weather = "Live weather data unavailable"
+
+                    st.session_state["trip_history"].append(
+                        {
+                            "label": f"Trip #{len(st.session_state['trip_history']) + 1}: {s1['origin']} → {s1['destination']} ({dur_in}d + Day 0)",
+                            "origin": s1["origin"],
+                            "destination": s1["destination"],
+                            "user_budget": bud_in,
+                            "live_hotels": discovered_hotels,
+                            "itinerary": itinerary,
+                        }
+                    )
+                    st.session_state["active_trip_idx"] = len(st.session_state["trip_history"]) - 1
+                    st.session_state["planner_expanded"] = False
+                    st.session_state["busy_action"] = None
+                    st.rerun()  # Full app rerun ONLY when a completed trip is added to trip_history
+                except Exception as exc:
+                    st.error(f"Error building itinerary: {exc}")
+                    st.session_state["busy_action"] = None
+                    st.rerun(scope="fragment")
+
+
+render_planner_fragment()
+
+if st.session_state["trip_history"]:
+    active_trip = st.session_state["trip_history"][st.session_state["active_trip_idx"]]
+    active_itin: TravelItinerary = active_trip["itinerary"]
+    if getattr(active_itin, "day_0_disclaimer", ""):
+        st.info(f"ℹ️ **Schedule Note:** {active_itin.day_0_disclaimer}")
+    render_trip_workspace(st.session_state["trip_history"])
+    if getattr(active_itin, "optional_return_path", ""):
+        st.info(f"🛫 **Optional Return Path (End of Day {active_itin.duration_days}):** {active_itin.optional_return_path}")
 else:
-    st.info("Configure your trip above and click **🚀 Generate Itinerary** (or **👀 Load Sample** for an instant preview).")
+    st.write("")
+    render_landing_attractions()

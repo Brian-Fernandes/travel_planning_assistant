@@ -1,8 +1,8 @@
-from typing import List
-
-from pydantic import BaseModel, Field
-
 from typing import List, Optional
+
+from pydantic import BaseModel
+
+
 class FlightOption(BaseModel):
     flight_id: str
     airline: str
@@ -54,8 +54,13 @@ class BudgetBreakdown(BaseModel):
 class TravelItinerary(BaseModel):
     destination: str
     duration_days: int
+    day_0_disclaimer: str = (
+        "Day 0 is dedicated solely to arrival transit so all requested days are 100% sightseeing; "
+        "return transit at the end of the final day is optional."
+    )
     trip_summary: str
     flight: Optional[FlightOption] = None
     hotel: Optional[HotelOption] = None
     itinerary: List[DayPlan]
+    optional_return_path: str = ""
     budget: BudgetBreakdown

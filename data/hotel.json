@@ -1,0 +1,107 @@
+[
+  {
+    "name": "Hotel Maple Wood",
+    "city": "Ranchi",
+    "stars": 3,
+    "price_per_night": 3200.0
+  },
+  {
+    "name": "Hotel Radisson Blu (Check standard/off-peak offers)",
+    "city": "Ranchi",
+    "stars": 4,
+    "price_per_night": 4800.0
+  },
+  {
+    "name": "Capitol Residency",
+    "city": "Ranchi",
+    "stars": 4,
+    "price_per_night": 4500.0
+  },
+  {
+    "hotel_id": "LIVE_H1",
+    "name": "Zone By The Park Patnitop",
+    "city": "Udhampur",
+    "stars": 4,
+    "price_per_night": 5500.0,
+    "amenities": [
+      "Free WiFi",
+      "Breakfast included",
+      "Spa",
+      "Fitness center",
+      "Restaurant"
+    ],
+    "source_note": "Premium upscale stay near Udhampur in the Patnitop region"
+  },
+  {
+    "hotel_id": "LIVE_H2",
+    "name": "Asia The Dawn",
+    "city": "Udhampur",
+    "stars": 4,
+    "price_per_night": 4800.0,
+    "amenities": [
+      "Free WiFi",
+      "Mountain view",
+      "Restaurant",
+      "Room service",
+      "Parking"
+    ],
+    "source_note": "Well-rated comfortable property offering luxury amenities"
+  },
+  {
+    "hotel_id": "LIVE_H3",
+    "name": "Hotel Mount View Patnitop",
+    "city": "Udhampur",
+    "stars": 3,
+    "price_per_night": 3900.0,
+    "amenities": [
+      "Free WiFi",
+      "Restaurant",
+      "Garden",
+      "Room service"
+    ],
+    "source_note": "Popular well-rated hotel with quality service and comfortable stay"
+  },
+  {
+    "hotel_id": "LIVE_H1",
+    "name": "The Hans Hotel",
+    "city": "Hubballi",
+    "stars": 3,
+    "price_per_night": 3800.0,
+    "amenities": [
+      "Free WiFi",
+      "Breakfast included",
+      "Restaurant",
+      "Air conditioning"
+    ],
+    "source_note": "Centrally located with reliable mid-range business amenities."
+  },
+  {
+    "hotel_id": "LIVE_H2",
+    "name": "Denissons",
+    "city": "Hubballi",
+    "stars": 4,
+    "price_per_night": 4500.0,
+    "amenities": [
+      "Free WiFi",
+      "Swimming pool",
+      "Fitness center",
+      "Restaurant",
+      "Room service"
+    ],
+    "source_note": "Well-rated upscale 4-star property often available near the upper limit of the budget."
+  },
+  {
+    "hotel_id": "LIVE_H3",
+    "name": "Hotel Metropolis",
+    "city": "Hubballi",
+    "stars": 3,
+    "price_per_night": 3200.0,
+    "amenities": [
+      "Free WiFi",
+      "Breakfast included",
+      "Free parking",
+      "Business center"
+    ],
+    "source_note": "Comfortable 3-star option known for good hospitality and value for money."
+  }
+]
